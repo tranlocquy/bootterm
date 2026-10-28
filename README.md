@@ -15,6 +15,7 @@ BootTerm is a simple, reliable and powerful terminal designed to ease connection
 - single binary without annoying dependencies, builds out of the box
 - supports stdin/stdout to inject/download data
 - configurable escape character and visible character ranges
+- optional headless MCP server with a shared human/AI terminal console on Linux and macOS
 
 ## Setup
 
@@ -34,6 +35,14 @@ Alternatively, BootTerm is available in some repositories:
 [ ![Packaging status](https://repology.org/badge/vertical-allrepos/bootterm.svg) ](https://repology.org/project/bootterm/versions)
 
 ## Using it
+
+### Shared console for AI-assisted debugging
+
+The optional [MCP adapter](doc/mcp.md) exposes serial tools to an AI while you
+watch and type in the same embedded console from a terminal. It uses the real
+BootTerm binary, supports Linux and macOS, and requires no GUI. Optional logs
+label AI, human, and device traffic with timestamps and TX/RX direction. See the linked
+guide for setup, MCP client configuration, and the `--console` attach command.
 
 ### Most common usage
 By default, `bt` connects to the last registered serial port, which usually is the most recently connected USB adapter. A list of currently available ports is obtained by `bt -l`:

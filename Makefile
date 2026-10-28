@@ -28,6 +28,7 @@ LDFLAGS    := $(DEB_LFLAGS) $(USR_LFLAGS) $(LIB_LFLAGS) $(THR_LFLAGS)
 AR         := $(CROSS_COMPILE)ar
 STRIP      := $(CROSS_COMPILE)strip
 INSTALL    := install
+PYTHON     ?= python3
 BINS       := bin/bt
 OBJS       :=
 OBJS       += $(patsubst %.c,%.o,$(wildcard src/*.c))
@@ -73,3 +74,7 @@ install-bins: bins
 
 clean:
 	$(Q)-rm -f $(BINS) $(OBJS) *.o *~
+
+.PHONY: test-mcp
+test-mcp: bins
+	$(PYTHON) -m pytest tests

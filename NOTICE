@@ -1,0 +1,12 @@
+The MCP tool definitions and stdio server setup in bootterm_mcp.py are adapted
+from xtell-cn/xtell-serial, xtell_serial_mcp.py (blob
+dc57638ac3439374166deceb3225639d98fc30ca), licensed under Apache-2.0:
+https://github.com/xtell-cn/xtell-serial/blob/main/xtell_serial_mcp.py
+
+Changes: replaced the GUI/TCP hub with local BootTerm subprocesses; added
+bounded histories, validation, lifecycle management and a shared terminal
+console over a local Unix socket. No xtell GUI code is included.
+
+The adapted MCP Python files are licensed under Apache-2.0; see
+LICENSES/Apache-2.0.txt. BootTerm's C code retains its existing MIT license
+in LICENSE.

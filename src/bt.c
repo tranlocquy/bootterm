@@ -33,6 +33,7 @@
 #include <fcntl.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -84,6 +85,7 @@ const char usage_msg[] =
 	"Options:\n"
 	"  -h           display this help\n"
 	"  -q           quiet mode: do not report events\n"
+	"  -R           raw byte stream for pipes; report BT_READY <baud> on stderr\n"
 	"  -p           only print selected port name and quit\n"
 	"  -l           list detected serial ports and quit\n"
 	"  -a           wait for a port to be available (BT_SCAN_WAIT_ANY)\n"
@@ -305,7 +307,29 @@ const char *port = NULL;
 int nbports = 0;
 int currport = -1; // last one
 int quiet = 0;
+int raw_mode = 0;
 int baud = 115200;
+volatile sig_atomic_t raw_stop = 0;
+int raw_reserved_fd = -1;
+
+/* Keep signal handlers async-signal-safe. The forwarding loop exits normally
+ * so atexit can release the reservation even if another descriptor still
+ * refers to the terminal (for example the master side of a pseudo-terminal).
+ */
+void stop_raw_session(int sig)
+{
+	(void)sig;
+	raw_stop = 1;
+}
+
+void release_raw_port(void)
+{
+#ifdef TIOCNXCL
+	if (raw_reserved_fd >= 0)
+		ioctl(raw_reserved_fd, TIOCNXCL);
+#endif
+	raw_reserved_fd = -1;
+}
 
 char cap_name[PATH_MAX];
 int cap_fd = -1; // -1 = no capture in progress
@@ -425,7 +449,8 @@ int set_port(int fd, int baud)
 {
 	struct termios2 tio;
 
-	ioctl(fd, TCGETS2, &tio);
+	if (ioctl(fd, TCGETS2, &tio) < 0)
+		return -1;
 	/* c_cflag serves to set both directions at once this way (CBAUD is a
 	 * mask for all the Bxxxx speed bits) (see termbits.h):
 	 *    (Bxxxx & CBAUD) << IBSHIFT for the input speed
@@ -524,7 +549,8 @@ int set_port(int fd, int baud)
 	tcflag_t baud_flag;
 
 	// see man tty_ioctl
-	tcgetattr(fd, &tio);
+	if (tcgetattr(fd, &tio) < 0)
+		return -1;
 
 	/* c_cflag serves to set both directions at once this way (CBAUD is a
 	 * mask for all the Bxxxx speed bits) (see termbits.h):
@@ -545,7 +571,7 @@ int set_port(int fd, int baud)
 		//tio.c_cflag &= ~(CBAUD | (CBAUD << IBSHIFT));
 		//tio.c_cflag |= BOTHER | (BOTHER << IBSHIFT);
 		baud_flag = baud_encode(baud);
-		if (baud_flag == ~0) { /* baud rate not found */
+		if (baud_flag == (tcflag_t)~0) { /* baud rate not found */
 			errno = EINVAL;
 			return -1;
 		}
@@ -1784,7 +1810,7 @@ void forward(int fd)
 	int in_esc = 0;
 	int err = 0;
 
-	if (isatty(0) && isatty(1)) {
+	if (!raw_mode && isatty(0) && isatty(1)) {
 		struct termios tio;
 
 		if (tcgetattr(0, &tio) != 0)
@@ -1824,6 +1850,9 @@ void forward(int fd)
 		struct timeval interval;
 		int cnt;
 
+		if (raw_mode && raw_stop)
+			break;
+
 		if (user_ibuf.room >= 0 && user_ibuf.len < BUFSIZE)
 			FD_SET(0, &rfds);
 		else
@@ -1845,7 +1874,10 @@ void forward(int fd)
 			FD_CLR(fd, &wfds);
 
 		gettimeofday(&now, NULL);
-		interval = tv_unset();
+		/* A bounded raw-mode wait also covers a stop signal arriving just
+		 * before select(), after the flag was checked above.
+		 */
+		interval = raw_mode ? tv_set(0, 100000) : tv_unset();
 
 		if (in_esc)
 			interval = tv_min(interval, tv_diff(now, escape_timeout));
@@ -1986,7 +2018,7 @@ void forward(int fd)
 		}
 
 		/* transfer between IN and opposite OUT buffers */
-		if (!in_esc && xfer_user_to_port(&user_ibuf, &port_obuf, escape) < 0) {
+		if (!in_esc && xfer_user_to_port(&user_ibuf, &port_obuf, raw_mode ? -1 : escape) < 0) {
 			/* we stopped in front of the escape character, let's
 			 * wait up to two seconds for the sequence to be entered.
 			 */
@@ -1995,7 +2027,7 @@ void forward(int fd)
 			in_esc = 1;
 		}
 
-		while (xfer_port_to_user(&port_ibuf, &user_obuf, chr_min, chr_max, &in_utf8) > 0) {
+		while (xfer_port_to_user(&port_ibuf, &user_obuf, chr_min, chr_max, raw_mode ? NULL : &in_utf8) > 0) {
 			/* xfer everything */
 		}
 	}
@@ -2119,6 +2151,10 @@ int main(int argc, char **argv)
 			quiet = 1;
 			break;
 
+		case 'R':
+			raw_mode = 1;
+			break;
+
 		case 'T':
 			ts_term = 1;
 			break;
@@ -2203,6 +2239,19 @@ int main(int argc, char **argv)
 
 	/* these are the remaining arguments not starting with "-" */
 	port = curr && *curr ? curr : NULL;
+
+	/* A machine client needs an unmodified byte stream regardless of the
+	 * terminal preferences inherited through the environment or options.
+	 */
+	if (raw_mode) {
+		quiet = 1;
+		cap_mode_str = "none";
+		ts_mode_str = "none";
+		ts_term = 0;
+		crlf_mode = CRLF_NORMAL;
+		chr_min = 0;
+		chr_max = 255;
+	}
 
 	if (cap_mode_str) {
 		if (strcmp(cap_mode_str, "none") == 0)
@@ -2429,6 +2478,29 @@ done_scan:
 		printf("Trying port %s...", port);
 
 go_with_fd:
+	if (raw_mode) {
+		struct sigaction action = { };
+
+		action.sa_handler = stop_raw_session;
+		sigemptyset(&action.sa_mask);
+		if (sigaction(SIGTERM, &action, NULL) < 0 ||
+		    sigaction(SIGINT, &action, NULL) < 0 ||
+		    sigaction(SIGHUP, &action, NULL) < 0 ||
+		    sigaction(SIGPIPE, &action, NULL) < 0)
+			die(2, "Failed to install signal handler: %s\n", strerror(errno));
+		if (atexit(release_raw_port) != 0)
+			die(2, "Failed to install port cleanup handler.\n");
+	}
+#ifdef TIOCEXCL
+	/* Prevent another client from opening a device owned by a pipe session.
+	 * Existing opens cannot be detected by this ioctl.
+	 */
+	if (raw_mode) {
+		if (ioctl(fd, TIOCEXCL) < 0)
+			die(2, "Failed to reserve port: %s\n", strerror(errno));
+		raw_reserved_fd = fd;
+	}
+#endif
 	ret = set_port(fd, baud);
 	if (ret == -1) {
 		int err = errno;
@@ -2471,6 +2543,13 @@ go_with_fd:
 
 	if (no_term)
 		return 0;
+
+	if (raw_mode) {
+		if (raw_stop)
+			return 0;
+		fprintf(stderr, "BT_READY %d\n", get_baud_rate(fd));
+		fflush(stderr);
+	}
 
 	/* set start time of capture just before forwarding */
 	gettimeofday(&start_ts, NULL);
